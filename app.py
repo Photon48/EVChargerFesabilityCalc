@@ -143,7 +143,7 @@ def main():
             st.write("No EV registration data found for Postcode:", postcode)
         st.write("Proposed Investments in Electrical Infrastructure within", radius_km, "km radius:")
         st.dataframe(nearby_proposed_investment)
-        st.write("Nearby electrical equiptment within", radius_km, "km radius:")
+        st.write("Planned Nearby electrical equiptment upgrades/repair within", radius_km, "km radius:")
         st.dataframe(nearby_assets)
         # Displaying the closest metro record
         if closest_metro_record is not None:
