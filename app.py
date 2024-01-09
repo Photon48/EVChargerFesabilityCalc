@@ -1,9 +1,20 @@
+import os
 import streamlit as st
 import pandas as pd
 import shapely.geometry
 import shapely.ops
 import geopy.distance
+import openai
 from geopy.distance import great_circle
+from dotenv import load_dotenv
+from streamlit_js_eval import streamlit_js_eval, copy_to_clipboard, create_share_link, get_geolocation
+
+load_dotenv()
+
+openai_api_key = os.getenv("OPENAI_API_KEY")
+
+# Starting up Open AI API.
+client = openai.OpenAI(api_key=openai_api_key)
 
 
 # Function to find the closest optimal EV charger potential from dataset from the zone defined distance.
@@ -18,30 +29,26 @@ def find_closest_regional_record(df, user_coordinates):
     return None
 
 # Function to find the closest record from the dataset and calculate distance
-def find_closest_record(df, user_coordinates, max_distance_km):
-    closest_distance = float('inf')
-    closest_record = None
-
-    for _, row in df.iterrows():
-        record_coordinates = (row['Latitude'], row['Longitude'])
-        distance = great_circle(user_coordinates, record_coordinates).km
-        if distance < closest_distance:
-            closest_distance = distance
-            closest_record = row
-
-    # Check if the closest record is within the 10km limit
-    if closest_distance > max_distance_km:
+def find_closest_location(df, user_coordinates):
+    if df.empty:
         return None
+    
+    # Calculate the distance for each record
+    df['distance_km'] = df.apply(lambda row: calculate_distance(user_coordinates, (row['latitude'], row['longitude'])), axis=1)
 
-    # Add a new column for distance if a record is found
-    if closest_record is not None:
-        closest_record = closest_record.copy()
-        closest_record['distance_km'] = closest_distance
+    # Sort by distance
+    df = df.sort_values('distance_km')
 
-    return closest_record
-
-
-
+    # Return the closest record with the distance column
+    closest_record = df.iloc[0]
+    
+    # Check if the closest record is within 5 km
+    if closest_record['distance_km'] > 5:
+        return None
+    # Drop the latitude and longitude columns from the closest record
+    closest_record = closest_record.drop(labels=['latitude', 'longitude'])
+    
+    return pd.DataFrame([closest_record])
 
 # Function to check if a point is within a radius of a line segment
 def is_within_radius_of_line_segment(user_point, line_start, line_end, radius_km):
@@ -65,12 +72,24 @@ def filter_locations_with_lines(df, user_coordinates, radius_km):
 def calculate_distance(coord1, coord2):
     return geopy.distance.geodesic(coord1, coord2).km
 
-# Function to filter locations within a given radius
+# Function to filter locations within a given radius and exclude latitude and longitude columns
 def filter_locations_within_radius(df, user_coordinates, radius_km):
-    return df[df.apply(lambda row: calculate_distance(user_coordinates, (row['latitude'], row['longitude'])) <= radius_km, axis=1)]
+    # Add a column for distance to each record
+    df['distance_km'] = df.apply(lambda row: calculate_distance(user_coordinates, (row['latitude'], row['longitude'])), axis=1)
 
+    # Filter the DataFrame based on the distance and radius
+    filtered_df = df[df['distance_km'] <= radius_km]
+
+    # Drop the latitude and longitude columns
+    #filtered_df = filtered_df.drop(columns=['latitude', 'longitude'])
+
+    # Order by distance
+    filtered_df = filtered_df.sort_values('distance_km')
+
+    return filtered_df
 def main():
-    
+    loc = get_geolocation()
+    st.write(f"Your Coordinates are {loc}")
     # Load the datasets
     ev_charging_stations = pd.read_csv('consolidated_existing_chargers.csv')
     petrol_station_data = pd.read_csv('petrol_station_data.csv')
@@ -112,49 +131,54 @@ def main():
         nearby_ev_chargers = filter_locations_within_radius(ev_charging_stations, user_coordinates, radius_km)
         nearby_petrol_stations = filter_locations_within_radius(petrol_station_data, user_coordinates, radius_km)
         nearby_traffic_data = filter_locations_within_radius(traffic_data_2018, user_coordinates, radius_km)
+        nearby_registrations = ev_registrations[ev_registrations['Postcode'] == postcode] # Depends on Postcode only. no coordinates are taken.
         nearby_proposed_investment = filter_locations_within_radius(proposed_investment, user_coordinates, radius_km)
         nearby_assets = filter_locations_with_lines(annual_input_output, user_coordinates, radius_km)
+        nearby_metro_optimal = find_closest_location(metro_optimal, user_coordinates)
+        nearby_regional_optimal = find_closest_regional_record(regional_optimal, user_coordinates)
         nearby_approved_chargers = filter_locations_within_radius(approved_chargers, user_coordinates, radius_km)
 
-        # Summarizing the data
+   
+
+
+        # Summarizing some of the data
         # ev_charger_summary = nearby_ev_chargers[['Name', 'Charger type', 'stations']].groupby(['Name', 'Charger type']).agg({'stations': 'sum'}).reset_index()
-        petrol_station_summary = nearby_petrol_stations['brand'].value_counts().reset_index().rename(columns={'index': 'Brand', 'brand': 'Count'})
-        traffic_summary = nearby_traffic_data[['road_name', 'traffic_count']].groupby('road_name').agg({'traffic_count': 'sum'}).reset_index()
-        registration_summary = ev_registrations[ev_registrations['Postcode'] == postcode]
-        investment_summary = nearby_proposed_investment
-        # After retrieving user_coordinates
-        closest_metro_record = find_closest_record(metro_optimal, user_coordinates,3)
-        # Finding the corresponding regional record
-        closest_regional_record = find_closest_regional_record(regional_optimal, user_coordinates)
+        # petrol_station_summary = nearby_petrol_stations['brand'].value_counts().reset_index().rename(columns={'index': 'Brand', 'brand': 'Count'})
+        traffic_summary = nearby_traffic_data[['road_name', 'suburb', 'traffic_count']].groupby(['road_name', 'suburb']).agg({'traffic_count': 'sum'}).reset_index()
         
 
+        # investment_summary = nearby_proposed_investment
+        
 
         # Displaying the summaries
         st.write("Existing EV Chargers within", radius_km, "km radius:")
         st.dataframe(nearby_ev_chargers)
+        
         st.write("Petrol Stations within", radius_km, "km radius:")
-        st.dataframe(petrol_station_summary)
+        st.dataframe(nearby_petrol_stations)
         st.write("Traffic Data of busy roads within", radius_km, "km radius:")
         st.dataframe(traffic_summary)
-        if not registration_summary.empty:
+        if nearby_registrations is not None:
             st.write("EV Car Registrations for Postcode:", postcode)
-            st.dataframe(registration_summary)
+            st.dataframe(nearby_registrations)
         else:
             st.write("No EV registration data found for Postcode:", postcode)
-        st.write("Proposed Investments in Electrical Infrastructure within", radius_km, "km radius:")
-        st.dataframe(nearby_proposed_investment)
+        # st.write("Proposed Investments in Electrical Infrastructure within", radius_km, "km radius:")
+        # st.dataframe(nearby_proposed_investment)
         st.write("Planned Nearby electrical equiptment upgrades/repair within", radius_km, "km radius:")
         st.dataframe(nearby_assets)
         # Displaying the closest metro record
-        if closest_metro_record is not None:
+        # Displaying the closest metro record
+        if nearby_metro_optimal is not None:
             st.write("Number of EV Charger plugs we need in the future (Metro):")
-            st.dataframe(closest_metro_record.to_dict())
+            # Convert a single DataFrame row to JSON
+            st.dataframe(nearby_metro_optimal)
         else:
             st.write("No close records found in Metro Optimal Data")
         # Displaying the corresponding regional record
-        if closest_regional_record is not None:
+        if nearby_regional_optimal is not None:
             st.write("Number of EV Charger plugs we need in the future (Regional):")
-            st.dataframe(closest_regional_record.to_dict())
+            st.dataframe(nearby_regional_optimal)
         else:
             st.write("No close records found in Regional Optimal Data within the specified zone")
         
